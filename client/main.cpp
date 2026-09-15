@@ -63,7 +63,11 @@ int main(int argc, char** argv) {
 
     std::string line;
     std::string logged_in_as;
-    while (std::getline(std::cin, line)) {
+    while (1) {
+        std::printf("[%s:%u] Client >", self_ip.c_str(), self_port);
+
+        if(!std::getline(std::cin, line)) break;
+        
         auto t = tokenize(line);
         if (t.empty()) continue;
 
