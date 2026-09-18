@@ -9,9 +9,8 @@
 namespace p2p {
 
 namespace {
-// Decodes an MSG_GET_FILE_META response body (see Session::dispatch's
-// MSG_GET_FILE_META case for the wire format this mirrors) into a fresh peer
-// list, skipping `self_uid` (no point asking ourselves for a piece).
+// Decodes an MSG_GET_FILE_META response body into a fresh peer
+// list skipping `self_uid` (no point asking ourselves for a piece).
 bool decode_peer_list(const std::string& resp, const std::string& self_uid,
                       std::vector<PeerAddr>& out) {
     Buffer in(resp);
