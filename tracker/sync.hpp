@@ -35,6 +35,12 @@
 //    can trim its log instead of growing it forever.
 //  * The link will drop. connect_loop() reconnects with a fixed backoff and
 //    redoes the handshake every time.
+//  * A process restart (not just a link drop) loses __log entirely, so a
+//    catch-up replay can't rebuild history. Either side detects this in
+//    itself via TrackerState::empty() right after the link (re)forms and
+//    sends MSG_SYNC_SNAPSHOT_REQUEST instead of MSG_SYNC_CATCHUP; the peer
+//    answers with MSG_SYNC_SNAPSHOT_DATA carrying TrackerState::snapshot(),
+//    which the empty side loads wholesale via TrackerState::restore().
 #include <cstdint>
 #include <deque>
 #include <mutex>

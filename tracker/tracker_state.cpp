@@ -3,6 +3,8 @@
 // Here all info a tracker can have is coded.
 
 #include "tracker_state.hpp"
+#include "../common/buffer.hpp"
+#include "../common/sha1.hpp"
 
 namespace p2p {
 
@@ -10,13 +12,19 @@ namespace p2p {
 // for updating ones like join / leave group check if user, grp already exists or not
 // always use mutex to handle state
 
+namespace {
+std::string hash_password(const std::string& pwd) {
+    return SHA1::hash_buffer(pwd.data(), pwd.size());
+}
+} // namespace
+
 Status TrackerState::create_user(const std::string& uid, const std::string& pwd) {
     if (uid.empty() || pwd.empty()) return ST_MALFORMED;
     std::lock_guard<std::mutex> g(__mu_lock);
     if (__Users.count(uid)) return ST_ALREADY_EXISTS;
     User u;
     u.id = uid;
-    u.password = pwd;
+    u.password = hash_password(pwd);
     __Users[uid] = u;
     return ST_OK;
 }
@@ -26,7 +34,7 @@ Status TrackerState::login(const std::string& uid, const std::string& pwd,
     std::lock_guard<std::mutex> g(__mu_lock);
     auto it = __Users.find(uid);
     if (it == __Users.end()) return ST_NOT_FOUND;
-    if (it->second.password != pwd) return ST_BAD_CREDENTIALS;
+    if (it->second.password != hash_password(pwd)) return ST_BAD_CREDENTIALS;
     it->second.online = true;
     it->second.ip = ip;
     it->second.port = port;
@@ -38,9 +46,13 @@ Status TrackerState::logout(const std::string& uid) {
     auto it = __Users.find(uid);
     if (it == __Users.end()) return ST_NOT_FOUND;
     it->second.online = false;
-    // TODO: a logged-out user stops seeding. Decide whether to remove it from
-    // every FileMeta::seeders now (simple, but O(files)) or to filter offline
-    // peers lazily when answering MSG_GET_FILE_META (cheaper, self-healing).
+    // A logged-out user stops seeding — drop it from every file's seeder
+    // map now so a peer list handed out later doesn't include someone
+    // nobody can reach. O(files), but logout/disconnect is rare next to
+    // reads of that same list.
+    for (auto& gkv : __Groups)
+        for (auto& fkv : gkv.second.files)
+            fkv.second.seeders.erase(uid);
     return ST_OK;
 }
 
@@ -48,6 +60,11 @@ bool TrackerState::is_online(const std::string& uid) {
     std::lock_guard<std::mutex> g(__mu_lock);
     auto it = __Users.find(uid);
     return it != __Users.end() && it->second.online;
+}
+
+bool TrackerState::empty() {
+    std::lock_guard<std::mutex> g(__mu_lock);
+    return __Users.empty() && __Groups.empty();
 }
 
 std::vector<std::string> TrackerState::list_groups() {
@@ -231,7 +248,126 @@ Status TrackerState::update_bitfield(const std::string& gid, const std::string& 
     return ST_OK;
 }
 
-std::string TrackerState::snapshot() { return std::string(); }   // TODO
-bool TrackerState::restore(const std::string&) { return false; } // TODO
+std::string TrackerState::snapshot() {
+    std::lock_guard<std::mutex> g(__mu_lock);
+    Buffer out;
+
+    out.put_u32(static_cast<uint32_t>(__Users.size()));
+    for (const auto& ukv : __Users) {
+        const User& u = ukv.second;
+        out.put_str(u.id);
+        out.put_str(u.password);
+        out.put_u8(u.online ? 1 : 0);
+        out.put_str(u.ip);
+        out.put_u16(u.port);
+    }
+
+    out.put_u32(static_cast<uint32_t>(__Groups.size()));
+    for (const auto& gkv : __Groups) {
+        const Group& grp = gkv.second;
+        out.put_str(grp.id);
+        out.put_str(grp.owner);
+
+        out.put_u32(static_cast<uint32_t>(grp.members.size()));
+        for (const auto& m : grp.members) out.put_str(m);
+
+        out.put_u32(static_cast<uint32_t>(grp.pending.size()));
+        for (const auto& p : grp.pending) out.put_str(p);
+
+        out.put_u32(static_cast<uint32_t>(grp.files.size()));
+        for (const auto& fkv : grp.files) {
+            const FileMeta& fm = fkv.second;
+            out.put_str(fm.name);
+            out.put_u64(fm.size);
+            out.put_str(fm.file_hash);
+
+            out.put_u32(static_cast<uint32_t>(fm.piece_hashes.size()));
+            for (const auto& h : fm.piece_hashes) out.put_str(h);
+
+            out.put_u32(static_cast<uint32_t>(fm.seeders.size()));
+            for (const auto& skv : fm.seeders) {
+                const PeerRef& pr = skv.second;
+                out.put_str(pr.user_id);
+                out.put_str(pr.ip);
+                out.put_u16(pr.port);
+                out.put_u32(static_cast<uint32_t>(pr.bitfield.size()));
+                out.put_raw(pr.bitfield.data(), pr.bitfield.size());
+            }
+        }
+    }
+    return out.str();
+}
+
+bool TrackerState::restore(const std::string& blob) {
+    Buffer in(blob);
+
+    std::map<std::string, User> users;
+    uint32_t nusers = 0;
+    if (!in.get_u32(nusers)) return false;
+    for (uint32_t i = 0; i < nusers; i++) {
+        User u;
+        uint8_t online = 0;
+        if (!in.get_str(u.id) || !in.get_str(u.password) || !in.get_u8(online) ||
+            !in.get_str(u.ip) || !in.get_u16(u.port)) return false;
+        u.online = online != 0;
+        users[u.id] = std::move(u);
+    }
+
+    std::map<std::string, Group> groups;
+    uint32_t ngroups = 0;
+    if (!in.get_u32(ngroups)) return false;
+    for (uint32_t i = 0; i < ngroups; i++) {
+        Group grp;
+        if (!in.get_str(grp.id) || !in.get_str(grp.owner)) return false;
+
+        uint32_t nmembers = 0;
+        if (!in.get_u32(nmembers)) return false;
+        for (uint32_t j = 0; j < nmembers; j++) {
+            std::string m;
+            if (!in.get_str(m)) return false;
+            grp.members.insert(m);
+        }
+
+        uint32_t npending = 0;
+        if (!in.get_u32(npending)) return false;
+        for (uint32_t j = 0; j < npending; j++) {
+            std::string p;
+            if (!in.get_str(p)) return false;
+            grp.pending.insert(p);
+        }
+
+        uint32_t nfiles = 0;
+        if (!in.get_u32(nfiles)) return false;
+        for (uint32_t j = 0; j < nfiles; j++) {
+            FileMeta fm;
+            if (!in.get_str(fm.name) || !in.get_u64(fm.size) || !in.get_str(fm.file_hash)) return false;
+
+            uint32_t npieces = 0;
+            if (!in.get_u32(npieces)) return false;
+            fm.piece_hashes.resize(npieces);
+            for (uint32_t k = 0; k < npieces; k++)
+                if (!in.get_str(fm.piece_hashes[k])) return false;
+
+            uint32_t nseeders = 0;
+            if (!in.get_u32(nseeders)) return false;
+            for (uint32_t k = 0; k < nseeders; k++) {
+                PeerRef pr;
+                uint32_t nbits = 0;
+                if (!in.get_str(pr.user_id) || !in.get_str(pr.ip) || !in.get_u16(pr.port) ||
+                    !in.get_u32(nbits)) return false;
+                pr.bitfield.resize(nbits);
+                if (nbits > 0 && !in.get_raw(pr.bitfield.data(), nbits)) return false;
+                fm.seeders[pr.user_id] = std::move(pr);
+            }
+            grp.files[fm.name] = std::move(fm);
+        }
+        groups[grp.id] = std::move(grp);
+    }
+
+    std::lock_guard<std::mutex> g(__mu_lock);
+    __Users = std::move(users);
+    __Groups = std::move(groups);
+    return true;
+}
 
 } // namespace p2p

@@ -28,7 +28,10 @@ bool PieceStore::open_for_download(const std::string& path, uint64_t size, uint3
     std::lock_guard<std::mutex> g(__mu_lock);
     fd_ = ::open(path.c_str(), O_RDWR | O_CREAT, 0644);
     if (fd_ < 0) return false;
-    if (::ftruncate(fd_, static_cast<off_t>(size)) < 0) { ::close(fd_); fd_ = -1; return false; }
+    if (::ftruncate(fd_, static_cast<off_t>(size)) < 0) { 
+        ::close(fd_); fd_ = -1; 
+        return false; 
+    }
     size_ = size;
     piece_count_ = pc;
     have_.assign(bitmap_bytes(pc), 0x00);

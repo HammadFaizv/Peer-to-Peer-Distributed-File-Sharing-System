@@ -73,9 +73,19 @@ void Seeder::serve_peer(int fd) {
             out.put_raw(data.data(), data.size());
             send_msg(fd, MSG_PIECE_DATA, ST_OK, out.str());
         } else if (hdr.type == MSG_BITFIELD_REQUEST) {
-            // TODO: reply with this peer's bitfield so the downloader can do
-            // rarest-first selection instead of asking blindly.
-            send_msg(fd, MSG_BITFIELD_DATA, ST_NOT_IMPLEMENTED, "");
+            ShareKey k;
+            if (!in.get_str(k.group) || !in.get_str(k.file)) {
+                send_msg(fd, MSG_BITFIELD_DATA, ST_MALFORMED, "");
+                continue;
+            }
+            auto store = find(k);
+            if (!store) {
+                send_msg(fd, MSG_BITFIELD_DATA, ST_NOT_FOUND, "");
+                continue;
+            }
+            auto bits = store->bitfield();
+            std::string out(reinterpret_cast<const char*>(bits.data()), bits.size());
+            send_msg(fd, MSG_BITFIELD_DATA, ST_OK, out);
         } else {
             send_msg(fd, MSG_RESPONSE, ST_NOT_IMPLEMENTED, "");
         }

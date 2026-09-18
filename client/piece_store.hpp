@@ -44,7 +44,7 @@ private:
     int      fd_ = -1;
     uint64_t size_ = 0;
     uint32_t piece_count_ = 0;
-    std::vector<uint8_t> have_;                     // bitmap
+    std::vector<uint8_t> have_; // bitmap
 };
 
 } // namespace p2p

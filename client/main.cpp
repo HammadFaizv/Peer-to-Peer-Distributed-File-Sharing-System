@@ -103,7 +103,10 @@ int main(int argc, char** argv) {
         else if (t.size() == 3 && t[0] == "login") {
             Buffer b; b.put_str(t[1]); b.put_str(t[2]); b.put_u16(self_port);
             if (tracker.request(MSG_LOGIN, b.str(), status, resp)) {
-                if (status == ST_OK) logged_in_as = t[1];
+                if (status == ST_OK) {
+                    logged_in_as = t[1];
+                    tracker.note_login(t[1], t[2], self_port);
+                }
                 std::cout << status_str(status) << "\n";
             } else std::cout << "tracker unreachable\n";
         }
@@ -266,6 +269,7 @@ int main(int argc, char** argv) {
             Buffer b; b.put_str(logged_in_as);
             tracker.request(MSG_LOGOUT, b.str(), status, resp);
             logged_in_as.clear();
+            tracker.clear_login();
             std::cout << "logged out\n";
 
         }

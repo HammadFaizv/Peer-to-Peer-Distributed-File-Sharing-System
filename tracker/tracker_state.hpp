@@ -40,7 +40,7 @@ struct Group {
 
 struct User {
     std::string id;
-    std::string password;                    // TODO: store a hash, not plaintext
+    std::string password;                    // SHA1 hex digest, never plaintext
     bool        online = false;
     std::string ip;
     uint16_t    port = 0;                    // the client's own seeder port
@@ -54,6 +54,10 @@ public:
                  const std::string& ip, uint16_t port);
     Status logout(const std::string& uid);
     bool   is_online(const std::string& uid);
+    // True once this process has no users/groups at all — the signal a
+    // freshly (re)started tracker uses to ask its peer for a full snapshot
+    // instead of a catch-up replay (see SyncManager).
+    bool   empty();
 
     // --- group management ------------------------------------------------
     Status create_group(const std::string& gid, const std::string& owner);

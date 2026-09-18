@@ -41,6 +41,8 @@ enum MsgType : uint16_t {
     MSG_SYNC_ACK         = 0x0402,
     MSG_SYNC_CATCHUP     = 0x0403, // "send me everything after seq N"
     MSG_SYNC_HELLO       = 0x0404,
+    MSG_SYNC_SNAPSHOT_REQUEST = 0x0405, // "I have nothing, send a full state dump"
+    MSG_SYNC_SNAPSHOT_DATA    = 0x0406, // TrackerState::snapshot() blob
 };
 
 enum Status : uint16_t {

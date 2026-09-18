@@ -64,11 +64,17 @@ void SyncManager::connect_loop() {
             std::lock_guard<std::mutex> g(__send_mu);
             send_msg(fd, MSG_SYNC_HELLO, 0, hello.str());
         }
-        // 2. ask the peer to replay whatever we missed while disconnected.
-        uint64_t after;
-        { std::lock_guard<std::mutex> g(__mu_lock); after = __applied_peer_seq; }
-        {
-            Buffer cu; 
+        // 2. ask the peer to bring us up to date. A process that just
+        // (re)started has empty state, so its own trimmed op log can't
+        // reconstruct history — ask for a full snapshot instead. Otherwise
+        // this is just a link drop and the catch-up replay suffices.
+        if (__state.empty()) {
+            std::lock_guard<std::mutex> g(__send_mu);
+            send_msg(fd, MSG_SYNC_SNAPSHOT_REQUEST, 0, "");
+        } else {
+            uint64_t after;
+            { std::lock_guard<std::mutex> g(__mu_lock); after = __applied_peer_seq; }
+            Buffer cu;
             cu.put_u64(after);
             std::lock_guard<std::mutex> g(__send_mu);
             send_msg(fd, MSG_SYNC_CATCHUP, 0, cu.str());
@@ -129,6 +135,15 @@ void SyncManager::handle_peer_connection(int fd) {
     }
     std::fprintf(stderr, "[sync] peer tracker linked to us\n");
 
+    // We only accept inbound links (self_index != 0); we never send our own
+    // HELLO/CATCHUP on this side, but if WE are the one that just (re)started
+    // — our own state is empty — we still need to ask the dialer for a full
+    // snapshot rather than silently sitting on nothing.
+    if (__state.empty()) {
+        std::lock_guard<std::mutex> g(__send_mu);
+        send_msg(fd, MSG_SYNC_SNAPSHOT_REQUEST, 0, "");
+    }
+
     MsgHeader hdr;
     std::string payload;
     while (true) {
@@ -181,6 +196,20 @@ void SyncManager::process_peer_message(int fd, uint16_t type, const std::string&
         if (!in.get_u64(seq)) return;
         std::lock_guard<std::mutex> g(__mu_lock);
         while (!__log.empty() && __log.front().seq <= seq) __log.pop_front();
+        return;
+    }
+    case MSG_SYNC_SNAPSHOT_REQUEST: {
+        std::string blob = __state.snapshot();
+        std::lock_guard<std::mutex> g(__send_mu);
+        send_msg(fd, MSG_SYNC_SNAPSHOT_DATA, 0, blob);
+        return;
+    }
+    case MSG_SYNC_SNAPSHOT_DATA: {
+        if (__state.restore(payload)) {
+            std::fprintf(stderr, "[sync] bootstrapped state from peer snapshot\n");
+        } else {
+            std::fprintf(stderr, "[sync] malformed snapshot from peer, ignoring\n");
+        }
         return;
     }
     default:
