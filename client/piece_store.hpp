@@ -24,6 +24,13 @@ public:
     // Create/reopen a destination file for downloading.
     bool open_for_download(const std::string& path, uint64_t size, uint32_t piece_count);
 
+    // Re-checks whatever is already on disk (e.g. left over from a download
+    // that crashed mid-way) against the expected per-piece hashes and marks
+    // any piece that already matches as have, so a resumed download only
+    // queues what's actually missing or corrupt. A no-op on a brand new
+    // (all-zero, sparse) file: nothing matches, everything stays queued.
+    void resume_scan(const std::vector<std::string>& piece_hashes);
+
     bool read_piece(uint32_t index, std::string& out) const;
     // Verifies against expected_hash before writing. Returns false if corrupt.
     bool write_piece(uint32_t index, const std::string& data,

@@ -55,6 +55,15 @@ void DownloadManager::run_job(std::shared_ptr<DownloadJob> job) {
         job->failed = true;
         return;
     }
+    // dest_path may already hold bytes from a previous attempt (e.g. this
+    // client crashed mid-download last time) — check what's already correct
+    // before deciding what still needs fetching, instead of redownloading
+    // the whole file unconditionally.
+    job->store->resume_scan(job->piece_hashes);
+    if (job->store->have_count() > 0) {
+        std::fprintf(stderr, "[download] %s/%s: resuming, %u/%u pieces already on disk\n",
+                     job->group.c_str(), job->file.c_str(), job->store->have_count(), pc);
+    }
 
     std::vector<PeerAddr> peers = job->peers;
     // Sequential piece selection: simple and good enough at the scale this
@@ -98,10 +107,19 @@ void DownloadManager::run_job(std::shared_ptr<DownloadJob> job) {
     job->done = true;
 }
 
+namespace {
+// A peer that's missing one piece (ST_NOT_FOUND) but otherwise fine
+// shouldn't be dropped after a single miss; a genuinely dead connection
+// will fail every attempt, so a small bound still catches that quickly
+// instead of the worker looping forever.
+constexpr int maxConsecutiveFailures = 3;
+} // namespace
+
 void DownloadManager::peer_worker(std::shared_ptr<DownloadJob> job, PeerAddr peer) {
     int fd = tcp_connect(peer.ip, peer.port);
     if (fd < 0) return; // dead peer: just retire this worker, its pieces stay queued
 
+    int consecutive_failures = 0;
     for (;;) {
         uint32_t index;
         {
@@ -115,12 +133,17 @@ void DownloadManager::peer_worker(std::shared_ptr<DownloadJob> job, PeerAddr pee
         bool ok = fetch_piece(fd, *job, index, data) &&
                   job->store->write_piece(index, data, job->piece_hashes[index]);
         if (!ok) {
-            // Dead connection or a corrupt/mismatched piece: give the piece
-            // back for a different peer to try and retire this worker.
+            // Give the piece back for a different peer to try. Don't retire
+            // this worker over one miss — the peer may simply not have that
+            // particular piece and could still serve others — but a peer
+            // that keeps failing is either dead or misbehaving, so give up
+            // on it once failures pile up instead of retrying forever.
             std::lock_guard<std::mutex> g(job->__queue_mu);
             job->__queue.push_back(index);
-            break;
+            if (++consecutive_failures >= maxConsecutiveFailures) break;
+            continue;
         }
+        consecutive_failures = 0;
 
         // Announce the freshly completed piece so this client is usable as
         // a partial seeder immediately, not only once the whole file is done.

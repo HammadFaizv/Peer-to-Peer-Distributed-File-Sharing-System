@@ -4,6 +4,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <algorithm>
 #include <cstring>
 
 namespace p2p {
@@ -36,6 +37,27 @@ bool PieceStore::open_for_download(const std::string& path, uint64_t size, uint3
     piece_count_ = pc;
     have_.assign(bitmap_bytes(pc), 0x00);
     return true;
+}
+
+void PieceStore::resume_scan(const std::vector<std::string>& piece_hashes) {
+    std::lock_guard<std::mutex> g(__mu_lock);
+    if (fd_ < 0) return;
+    std::string buf;
+    uint32_t n = std::min(piece_count_, static_cast<uint32_t>(piece_hashes.size()));
+    for (uint32_t i = 0; i < n; ++i) {
+        uint32_t len = piece_len(i);
+        buf.assign(len, '\0');
+        off_t off = static_cast<off_t>(i) * PIECE_SIZE;
+        size_t got = 0;
+        bool ok = true;
+        while (got < len) {
+            ssize_t k = ::pread(fd_, &buf[got], len - got, off + got);
+            if (k <= 0) { ok = false; break; }
+            got += static_cast<size_t>(k);
+        }
+        if (ok && SHA1::hash_buffer(buf.data(), buf.size()) == piece_hashes[i])
+            have_[i / 8] |= (0x80u >> (i % 8));
+    }
 }
 
 uint32_t PieceStore::piece_len(uint32_t index) const {
