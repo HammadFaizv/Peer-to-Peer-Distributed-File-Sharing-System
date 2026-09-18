@@ -1,6 +1,6 @@
 #pragma once
-// Self-contained SHA1 (RFC 3174). No external crypto library, per the
-// assignment's constraint on third-party libraries.
+// Self-contained SHA1 (RFC 3174) no external crypto library, per the
+// assignment's constraint on third-party libraries
 #include <cstdint>
 #include <cstddef>
 #include <string>

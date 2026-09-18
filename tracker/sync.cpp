@@ -289,8 +289,7 @@ bool SyncManager::apply_remote(const Op& op) {
         return s == ST_OK;
     }
 
-    // TODO: MSG_LOGIN/MSG_LOGOUT are per-connection session state, deliberately
-    // not replicated as ops.
+    // MSG_LOGIN/MSG_LOGOUT are per-connection session state, deliberately not replicated.
     default:
         return false;
     }

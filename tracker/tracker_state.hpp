@@ -1,5 +1,5 @@
 #pragma once
-// Authoritative in-memory metadata for the tracker. Every public method takes
+// In-memory metadata for the tracker. Every public method takes
 // the lock, so callers (one thread per client connection) need no extra
 // synchronisation.
 #include <cstdint>
@@ -48,18 +48,13 @@ struct User {
 
 class TrackerState {
 public:
-    // --- user management -------------------------------------------------
     Status create_user(const std::string& uid, const std::string& pwd);
     Status login(const std::string& uid, const std::string& pwd,
                  const std::string& ip, uint16_t port);
     Status logout(const std::string& uid);
     bool   is_online(const std::string& uid);
-    // True once this process has no users/groups at all — the signal a
-    // freshly (re)started tracker uses to ask its peer for a full snapshot
-    // instead of a catch-up replay (see SyncManager).
     bool   empty();
 
-    // --- group management ------------------------------------------------
     Status create_group(const std::string& gid, const std::string& owner);
     Status join_group(const std::string& gid, const std::string& uid);
     Status leave_group(const std::string& gid, const std::string& uid);
@@ -68,13 +63,7 @@ public:
     std::vector<std::string> list_groups();
     Status list_requests(const std::string& gid, const std::string& owner,
                          std::vector<std::string>& out);
-
-    // --- file metadata ---------------------------------------------------
-    // `ip`/`port` are the seeder's own address as known by the session that
-    // is actually talking to it — pass these through explicitly rather than
-    // looking them up locally, because on a tracker replaying a replicated
-    // op the local User record for a peer connected to the *other* tracker
-    // has no ip/port (MSG_LOGIN is not replicated; see SyncManager).
+                         
     Status add_file(const std::string& gid, const std::string& uid,
                     const std::string& ip, uint16_t port,
                     const FileMeta& meta);

@@ -13,10 +13,8 @@ public:
 
     void run();   // read/dispatch loop; closes fd_ on exit
 
-    // Process one message the caller already read off fd_ (main.cpp has to
-    // peek the first message to tell a client apart from a peer tracker
-    // dialing in with MSG_SYNC_HELLO) before handing off to run() for the
-    // rest of the connection's messages.
+    // Process one message the caller already read off fd_ 
+    // checks for peer or client using MSG_SYNC_HELLO
     void handle_one(uint16_t type, const std::string& payload) { dispatch(type, payload); }
 
 private:

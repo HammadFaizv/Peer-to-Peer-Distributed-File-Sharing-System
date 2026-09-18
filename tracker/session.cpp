@@ -140,8 +140,7 @@ void Session::dispatch(uint16_t type, const std::string& payload) {
         Status s = __state.add_file(gid, user_, __peer_ip, seed_port_, meta);
         if (s == ST_OK) {
             // Carry our own known ip:port through so the peer tracker's
-            // replayed add_file doesn't have to (and can't reliably) look
-            // it up locally — see the comment on TrackerState::add_file.
+            // replayed add_file doesn't have to look it up locally
             Buffer rep(payload);
             rep.put_str(user_);
             rep.put_str(__peer_ip);

@@ -1,21 +1,9 @@
+// download manager deal with all downloads using
+// thread per peer for a download instead of per piece
+// benefits - lower thread count no need to create new thread for each piece
+// as pieces can be many
 #pragma once
-// Drives one or more concurrent downloads, each fanned out across peers.
-//
-// SUGGESTED SHAPE, per download:
-//   - a shared work queue of piece indices still needed
-//   - N worker threads, each pinned to one peer, looping:
-//       take next needed piece -> request from its peer -> verify -> write ->
-//       mark done -> announce MSG_HAVE_PIECES to the tracker
-//   - a piece handed out but not delivered within a timeout goes back on the
-//     queue so another peer can take it (this is what makes peer death
-//     survivable)
-//   - as soon as the first piece verifies, register as a partial seeder: the
-//     downloader becomes a source for everyone else
-//
-// PIECE SELECTION is yours to choose and to justify in the report:
-//   sequential (trivial, poor peer utilisation) / random (good spread) /
-//   rarest-first (best swarm health, needs peer bitfields) / endgame mode
-//   (request the last few pieces from every peer at once to avoid a long tail).
+
 #include <atomic>
 #include <map>
 #include <memory>

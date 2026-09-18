@@ -3,44 +3,25 @@
 //
 // DESIGN (decided):
 //
-//  * Topology: active/active over a SINGLE physical TCP link between the two
-//    trackers. To avoid ending up with two redundant sockets (each side
-//    dialing the other), only the lower-indexed tracker (index 0) dials out
-//    in connect_loop(); the higher-indexed tracker (index 1) just waits for
-//    that inbound connection in its accept loop and hands the fd to
-//    handle_peer_connection(). The link is full-duplex: once established,
-//    either side can push MSG_SYNC_OP on it whenever a local mutation
-//    happens (record_and_replicate), and either side reads and applies
-//    whatever the other side pushes.
-//  * Every state-changing request produces an Op with a monotonically
-//    increasing sequence number, scoped to the tracker that originated it
-//    (__next_seq here numbers *our own* ops; the peer numbers its own
-//    independently). The op log (__log) is the unit of replication —
-//    replaying it from seq N is how a reconnecting peer catches up.
-//  * Sync is fully async: record_and_replicate() applies locally first and
-//    returns immediately; the network write is best-effort. If the link is
-//    down the op simply stays buffered in __log until the peer reconnects and
-//    asks for catch-up. This means a client talking to tracker B can briefly
-//    NOT see a mutation (e.g. a new user) made via tracker A — that window
-//    is the price of staying available while the link is down.
-//  * Because most state here is add-only (users, group members, seeders),
-//    replaying/merging is just "apply again" — TrackerState::create_user
-//    returning ST_ALREADY_EXISTS on a replay is treated as success, not an
-//    error. Removals are the hard part (need tombstones or last-writer-wins
-//    on op.ts) and are left as a TODO in apply_remote().
-//  * Handshake on (re)connect: dialer sends MSG_SYNC_HELLO (identifies
-//    itself) then MSG_SYNC_CATCHUP{after_seq = __applied_peer_seq} so the
-//    acceptor knows where to resume; the acceptor replays its log via
-//    send_catchup_from(). Applied ops are ACKed (MSG_SYNC_ACK) so the sender
-//    can trim its log instead of growing it forever.
-//  * The link will drop. connect_loop() reconnects with a fixed backoff and
-//    redoes the handshake every time.
-//  * A process restart (not just a link drop) loses __log entirely, so a
-//    catch-up replay can't rebuild history. Either side detects this in
-//    itself via TrackerState::empty() right after the link (re)forms and
-//    sends MSG_SYNC_SNAPSHOT_REQUEST instead of MSG_SYNC_CATCHUP; the peer
-//    answers with MSG_SYNC_SNAPSHOT_DATA carrying TrackerState::snapshot(),
-//    which the empty side loads wholesale via TrackerState::restore().
+// Topology: A single full-duplex TCP link. Tracker 0 dials; Tracker 1 listens. 
+// Both push updates (MSG_SYNC_OP).
+
+// Eventual Consistency: Local changes apply immediately for high availability, 
+// generating an operation with a local sequence number that 
+// replicates asynchronously.
+
+// Idempotent Updates: Additive changes (like creating a user) can be 
+// safely replayed.
+
+// Catch-Up & Trimming: On reconnect, peers request missing operations 
+// based on their last-seen sequence. Applied operations are ACKed to 
+// free up log space.
+
+// Fault Tolerance: Disconnects trigger automatic reconnects with a fixed backoff.
+
+// Cold Starts: If a tracker fully restarts and loses its log, it 
+// requests a complete state snapshot from its peer 
+// instead of a standard catch-up.
 #include <cstdint>
 #include <deque>
 #include <mutex>

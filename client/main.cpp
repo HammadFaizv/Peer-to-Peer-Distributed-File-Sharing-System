@@ -247,7 +247,7 @@ int main(int argc, char** argv) {
             if (job->peers.empty()) { std::cout << "no online peers hold this file\n"; continue; }
 
             if (downloads.start(job)) std::cout << "download started\n";
-            else std::cout << "a download for this group/file is already running\n";
+            else std::cout << "a download for this group/file is already exists, use show_downloads\n";
         }
         // show_downloads
         else if (t.size() == 1 && t[0] == "show_downloads") {

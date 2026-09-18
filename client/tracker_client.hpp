@@ -21,12 +21,12 @@ public:
     void disconnect();
 
     // Sends a request and waits for the MSG_RESPONSE. On a dead connection it
-    // reconnects to the other tracker and retries once — this is what makes
-    // "keeps working while one tracker is down" true from the client's side.
-    // If a login is on file (see note_login below) and the request has to
+    // reconnects to the other tracker and retries once
+    // If a login is on file and the request has to
     // establish a fresh connection, it transparently replays MSG_LOGIN on
     // that connection first, so a fail-over doesn't surface ST_NOT_LOGGED_IN
     // for every command until the user manually logs in again.
+    // the above issue has been checked out.
     bool request(uint16_t type, const std::string& payload,
                  uint16_t& status, std::string& resp);
 

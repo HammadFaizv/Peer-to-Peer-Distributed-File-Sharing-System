@@ -10,7 +10,7 @@ namespace p2p {
 
 namespace {
 // Decodes an MSG_GET_FILE_META response body into a fresh peer
-// list skipping `self_uid` (no point asking ourselves for a piece).
+// list skipping `self_uid`.
 bool decode_peer_list(const std::string& resp, const std::string& self_uid,
                       std::vector<PeerAddr>& out) {
     Buffer in(resp);
@@ -55,10 +55,9 @@ void DownloadManager::run_job(std::shared_ptr<DownloadJob> job) {
         job->failed = true;
         return;
     }
-    // dest_path may already hold bytes from a previous attempt (e.g. this
-    // client crashed mid-download last time) — check what's already correct
-    // before deciding what still needs fetching, instead of redownloading
-    // the whole file unconditionally.
+    // dest_path contains bytes for pieces already downloaded. in case
+    // client crashed mid-download - check what's already correct before fetching
+    // dont redownload whole file.
     job->store->resume_scan(job->piece_hashes);
     if (job->store->have_count() > 0) {
         std::fprintf(stderr, "[download] %s/%s: resuming, %u/%u pieces already on disk\n",
@@ -66,8 +65,8 @@ void DownloadManager::run_job(std::shared_ptr<DownloadJob> job) {
     }
 
     std::vector<PeerAddr> peers = job->peers;
-    // Sequential piece selection: simple and good enough at the scale this
-    // was tested at. A peer that dies or sends a bad piece drops its claim
+    // Sequential piece selection: simple and good enough at this scale (upto 1gb)
+    // A peer that dies or sends a bad piece - drops it
     // back on the queue (peer_worker) so this loop only needs to notice when
     // pieces are still missing after everyone has had a turn.
     for (int round = 0; round < 3 && !job->store->complete() && !peers.empty(); ++round) {
@@ -86,9 +85,8 @@ void DownloadManager::run_job(std::shared_ptr<DownloadJob> job) {
         if (job->store->complete()) break;
 
         // Some pieces are still missing because every peer that had them
-        // died or misbehaved this round; ask the tracker for a fresh peer
-        // list (it will reflect anyone who has come online meanwhile) and
-        // try again, up to the round bound above.
+        // died or misbehaved this round; ask the tracker for a fresh peer list
+        // and try again
         Buffer req; req.put_str(job->group); req.put_str(job->file);
         uint16_t status; std::string resp;
         peers.clear();
@@ -110,7 +108,7 @@ void DownloadManager::run_job(std::shared_ptr<DownloadJob> job) {
 namespace {
 // A peer that's missing one piece (ST_NOT_FOUND) but otherwise fine
 // shouldn't be dropped after a single miss; a genuinely dead connection
-// will fail every attempt, so a small bound still catches that quickly
+// will fail every attempt, so check for consecutive failure to get piece
 // instead of the worker looping forever.
 constexpr int maxConsecutiveFailures = 3;
 } // namespace
@@ -134,10 +132,8 @@ void DownloadManager::peer_worker(std::shared_ptr<DownloadJob> job, PeerAddr pee
                   job->store->write_piece(index, data, job->piece_hashes[index]);
         if (!ok) {
             // Give the piece back for a different peer to try. Don't retire
-            // this worker over one miss — the peer may simply not have that
-            // particular piece and could still serve others — but a peer
-            // that keeps failing is either dead or misbehaving, so give up
-            // on it once failures pile up instead of retrying forever.
+            // this worker over one miss — so give up
+            // on it once all failures pile up instead of retrying forever.
             std::lock_guard<std::mutex> g(job->__queue_mu);
             job->__queue.push_back(index);
             if (++consecutive_failures >= maxConsecutiveFailures) break;
@@ -145,8 +141,7 @@ void DownloadManager::peer_worker(std::shared_ptr<DownloadJob> job, PeerAddr pee
         }
         consecutive_failures = 0;
 
-        // Announce the freshly completed piece so this client is usable as
-        // a partial seeder immediately, not only once the whole file is done.
+        // Announce the freshly completed piece so this client is usable
         Buffer hb;
         hb.put_str(job->group);
         hb.put_str(job->file);
@@ -185,8 +180,7 @@ std::vector<std::string> DownloadManager::status_lines() {
     std::vector<std::string> out;
     for (const auto& kv : jobs_) {
         const auto& j = kv.second;
-        // The spec only mandates the completed form; add a progress form for
-        // in-flight downloads and document it in your README.
+        // only tells status not progress
         if (j->done) out.push_back("[C] [" + j->group + "] " + j->file);
         else if (j->failed) out.push_back("[F] [" + j->group + "] " + j->file);
         else out.push_back("[D] [" + j->group + "] " + j->file);
