@@ -1,5 +1,5 @@
-#include "piece_store.h"
-#include "../common/sha1.h"
+#include "piece_store.hpp"
+#include "../common/sha1.hpp"
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -10,7 +10,9 @@ namespace p2p {
 
 PieceStore::~PieceStore() { if (fd_ >= 0) ::close(fd_); }
 
-static inline size_t bitmap_bytes(uint32_t n) { return (n + 7) / 8; }
+static inline size_t bitmap_bytes(uint32_t n) { 
+    return (n + 7) / 8; 
+}
 
 bool PieceStore::open_for_seed(const std::string& path, uint64_t size, uint32_t pc) {
     std::lock_guard<std::mutex> g(__mu_lock);

@@ -9,12 +9,12 @@
 #include <string>
 #include <vector>
 
-#include "../common/net.h"
-#include "../common/buffer.h"
-#include "../common/sha1.h"
-#include "tracker_client.h"
-#include "seeder.h"
-#include "download_manager.h"
+#include "../common/net.hpp"
+#include "../common/buffer.hpp"
+#include "../common/sha1.hpp"
+#include "tracker_client.hpp"
+#include "seeder.hpp"
+#include "download_manager.hpp"
 
 using namespace p2p;
 
@@ -59,7 +59,7 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "could not bind seeder port %u\n", self_port);
         return 1;
     }
-    DownloadManager downloads(seeder);
+    DownloadManager downloads(seeder, tracker);
 
     std::string line;
     std::string logged_in_as;
@@ -163,29 +163,104 @@ int main(int argc, char** argv) {
         }
         // upload_file <group id> <file path>
         else if (t.size() == 3 && t[0] == "upload_file") {
+            if (logged_in_as.empty()) { std::cout << "not logged in\n"; continue; }
+            const std::string& path = t[2];
             // Hash locally, publish metadata, then start seeding.
             std::string piece_blob;
             uint64_t size = 0;
-            std::string whole = SHA1::hash_file(t[3], PIECE_SIZE, &piece_blob, &size);
+            std::string whole = SHA1::hash_file(path, PIECE_SIZE, &piece_blob, &size);
             if (whole.empty()) { std::cout << "cannot read file\n"; continue; }
-            // TODO: pack {group, filename, size, whole, piece hashes} into a
-            // Buffer, send MSG_UPLOAD_FILE, and on ST_OK create a PieceStore
-            // with open_for_seed() and hand it to seeder.add_share().
-            std::cout << "TODO: upload (" << size << " bytes, "
-                      << piece_blob.size() / SHA1_HEX_LEN << " pieces, sha1 "
-                      << whole << ")\n";
-        } 
+
+            uint32_t piece_count = static_cast<uint32_t>(piece_blob.size() / SHA1_HEX_LEN);
+            std::string fname = path.substr(path.find_last_of('/') + 1); // basename
+
+            Buffer b;
+            b.put_str(t[1]);          // group
+            b.put_str(fname);         // published name
+            b.put_u64(size);
+            b.put_str(whole);
+            b.put_u32(piece_count);
+            for (uint32_t i = 0; i < piece_count; i++)
+                b.put_str(piece_blob.substr(i * SHA1_HEX_LEN, SHA1_HEX_LEN));
+
+            if (!tracker.request(MSG_UPLOAD_FILE, b.str(), status, resp)) {
+                std::cout << "tracker unreachable\n";
+                continue;
+            }
+            if (status != ST_OK) { std::cout << status_str(status) << "\n"; continue; }
+
+            auto store = std::make_shared<PieceStore>();
+            if (!store->open_for_seed(path, size, piece_count)) {
+                std::cout << "uploaded metadata, but could not reopen file for seeding\n";
+                continue;
+            }
+            seeder.add_share(ShareKey{t[1], fname}, store);
+            std::cout << "uploaded " << fname << " (" << size << " bytes, "
+                      << piece_count << " pieces)\n";
+        }
+        // list_files <group id>
+        else if (t.size() == 2 && t[0] == "list_files") {
+            Buffer b; b.put_str(t[1]);
+            if (tracker.request(MSG_LIST_FILES, b.str(), status, resp) && status == ST_OK) {
+                Buffer in(resp);
+                uint32_t n = 0; in.get_u32(n);
+                for (uint32_t i = 0; i < n; ++i) { std::string f; in.get_str(f); std::cout << f << "\n"; }
+            } else std::cout << status_str(status) << "\n";
+        }
         // download_file <group id> <file name> <destination path>
         else if (t.size() == 4 && t[0] == "download_file") {
-            // TODO: MSG_GET_FILE_META -> build a DownloadJob -> downloads.start()
-            std::cout << "TODO: download\n";
+            if (logged_in_as.empty()) { std::cout << "not logged in\n"; continue; }
+            Buffer b; b.put_str(t[1]); b.put_str(t[2]);
+            if (!tracker.request(MSG_GET_FILE_META, b.str(), status, resp)) {
+                std::cout << "tracker unreachable\n";
+                continue;
+            }
+            if (status != ST_OK) { std::cout << status_str(status) << "\n"; continue; }
 
-        } 
+            Buffer in(resp);
+            auto job = std::make_shared<DownloadJob>();
+            job->group = t[1];
+            job->file = t[2];
+            job->dest_path = t[3];
+            job->user_id = logged_in_as;
+            uint32_t pc = 0;
+            if (!in.get_u64(job->size) || !in.get_str(job->file_hash) || !in.get_u32(pc)) {
+                std::cout << "malformed metadata from tracker\n";
+                continue;
+            }
+            job->piece_hashes.resize(pc);
+            for (uint32_t i = 0; i < pc; i++) in.get_str(job->piece_hashes[i]);
+            uint32_t npeers = 0;
+            in.get_u32(npeers);
+            for (uint32_t i = 0; i < npeers; i++) {
+                PeerAddr pa;
+                uint32_t nbits = 0;
+                in.get_str(pa.user_id); in.get_str(pa.ip); in.get_u16(pa.port);
+                in.get_u32(nbits);
+                std::vector<uint8_t> bits(nbits);
+                if (nbits > 0) in.get_raw(bits.data(), nbits);
+                if (pa.user_id != logged_in_as) job->peers.push_back(pa);
+            }
+            if (job->peers.empty()) { std::cout << "no online peers hold this file\n"; continue; }
+
+            if (downloads.start(job)) std::cout << "download started\n";
+            else std::cout << "a download for this group/file is already running\n";
+        }
         // show_downloads
-        else if (t.size() == 2 && t[0] == "show_downloads") {
+        else if (t.size() == 1 && t[0] == "show_downloads") {
             for (const auto& s : downloads.status_lines()) std::cout << s << "\n";
 
-        } 
+        }
+        // stop_share <group id> <file name>
+        else if (t.size() == 3 && t[0] == "stop_share") {
+            Buffer b; b.put_str(t[1]); b.put_str(t[2]);
+            if (!tracker.request(MSG_STOP_SHARE, b.str(), status, resp)) {
+                std::cout << "tracker unreachable\n";
+                continue;
+            }
+            if (status == ST_OK) seeder.remove_share(ShareKey{t[1], t[2]});
+            std::cout << status_str(status) << "\n";
+        }
         // logout
         else if (t.size() == 1 && t[0] == "logout") {
             Buffer b; b.put_str(logged_in_as);
@@ -193,14 +268,13 @@ int main(int argc, char** argv) {
             logged_in_as.clear();
             std::cout << "logged out\n";
 
-        } 
+        }
         // exit & quit
         else if (t.size() == 1 && (t[0] == "exit" || t[0] == "quit")) {
             break;
 
         } else {
-            // TODO: list files / stop share
-            std::cout << "unrecognised or not yet implemented: " << line << "\n";
+            std::cout << "unrecognised command: " << line << "\n";
         }
     }
 

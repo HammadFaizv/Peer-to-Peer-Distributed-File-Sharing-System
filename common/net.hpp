@@ -1,7 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <string>
-#include "protocol.h"
+#include "protocol.hpp"
 
 namespace p2p {
 

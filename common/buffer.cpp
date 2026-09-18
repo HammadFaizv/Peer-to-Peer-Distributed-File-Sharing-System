@@ -1,4 +1,4 @@
-#include "buffer.h"
+#include "buffer.hpp"
 #include <cstring>
 
 namespace p2p {

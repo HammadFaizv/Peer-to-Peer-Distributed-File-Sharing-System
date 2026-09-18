@@ -6,7 +6,7 @@
 #include <string>
 #include <thread>
 
-#include "piece_store.h"
+#include "piece_store.hpp"
 
 namespace p2p {
 

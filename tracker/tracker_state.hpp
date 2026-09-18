@@ -9,7 +9,7 @@
 #include <string>
 #include <vector>
 
-#include "../common/protocol.h"
+#include "../common/protocol.hpp"
 
 namespace p2p {
 
@@ -66,7 +66,13 @@ public:
                          std::vector<std::string>& out);
 
     // --- file metadata ---------------------------------------------------
+    // `ip`/`port` are the seeder's own address as known by the session that
+    // is actually talking to it — pass these through explicitly rather than
+    // looking them up locally, because on a tracker replaying a replicated
+    // op the local User record for a peer connected to the *other* tracker
+    // has no ip/port (MSG_LOGIN is not replicated; see SyncManager).
     Status add_file(const std::string& gid, const std::string& uid,
+                    const std::string& ip, uint16_t port,
                     const FileMeta& meta);
     Status list_files(const std::string& gid, const std::string& uid,
                       std::vector<std::string>& out);
@@ -75,6 +81,7 @@ public:
     Status stop_share(const std::string& gid, const std::string& uid,
                       const std::string& fname);
     Status update_bitfield(const std::string& gid, const std::string& uid,
+                           const std::string& ip, uint16_t port,
                            const std::string& fname,
                            const std::vector<uint8_t>& bits);
 

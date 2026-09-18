@@ -11,7 +11,7 @@
 #include <string>
 #include <vector>
 
-#include "../common/protocol.h"
+#include "../common/protocol.hpp"
 
 namespace p2p {
 

@@ -1,4 +1,4 @@
-#include "sha1.h"
+#include "sha1.hpp"
 
 #include <fcntl.h>
 #include <unistd.h>

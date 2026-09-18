@@ -14,10 +14,10 @@
 #include <thread>
 #include <vector>
 
-#include "../common/net.h"
-#include "tracker_state.h"
-#include "sync.h"
-#include "session.h"
+#include "../common/net.hpp"
+#include "tracker_state.hpp"
+#include "sync.hpp"
+#include "session.hpp"
 
 using namespace p2p;
 

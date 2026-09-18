@@ -1,6 +1,6 @@
-#include "seeder.h"
-#include "../common/net.h"
-#include "../common/buffer.h"
+#include "seeder.hpp"
+#include "../common/net.hpp"
+#include "../common/buffer.hpp"
 
 #include <sys/socket.h>
 #include <netinet/in.h>

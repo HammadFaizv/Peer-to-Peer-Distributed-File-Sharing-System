@@ -1,6 +1,6 @@
-#include "sync.h"
-#include "../common/net.h"
-#include "../common/buffer.h"
+#include "sync.hpp"
+#include "../common/net.hpp"
+#include "../common/buffer.hpp"
 
 #include <sys/socket.h>
 #include <unistd.h>
@@ -225,12 +225,43 @@ bool SyncManager::apply_remote(const Op& op) {
         return s == ST_OK || s == ST_NOT_FOUND;
     }
 
-    // TODO: MSG_LOGIN/MSG_LOGOUT are per-connection session state, not
-    // usually worth replicating as-is; MSG_UPLOAD_FILE, MSG_HAVE_PIECES etc.
-    // follow the exact same pattern as above: decode with Buffer the same
-    // fields the session.cpp dispatch() case builds for record_and_replicate,
-    // call the matching TrackerState method, and treat "already applied"
-    // statuses as success.
+    case MSG_UPLOAD_FILE: {
+        std::string gid;
+        FileMeta meta;
+        uint32_t pc = 0;
+        if (!in.get_str(gid) || !in.get_str(meta.name) || !in.get_u64(meta.size) ||
+            !in.get_str(meta.file_hash) || !in.get_u32(pc)) return false;
+        meta.piece_hashes.resize(pc);
+        for (uint32_t i = 0; i < pc; i++) if (!in.get_str(meta.piece_hashes[i])) return false;
+        std::string uid, ip;
+        uint16_t port = 0;
+        if (!in.get_str(uid) || !in.get_str(ip) || !in.get_u16(port)) return false;
+        Status s = __state.add_file(gid, uid, ip, port, meta);
+        // ST_ALREADY_EXISTS on replay means we already have this file.
+        return s == ST_OK || s == ST_ALREADY_EXISTS;
+    }
+    case MSG_STOP_SHARE: {
+        std::string gid, fname, uid;
+        if (!in.get_str(gid) || !in.get_str(fname) || !in.get_str(uid)) return false;
+        Status s = __state.stop_share(gid, uid, fname);
+        // ST_NOT_FOUND on replay means this seeder is already gone from the file.
+        return s == ST_OK || s == ST_NOT_FOUND;
+    }
+    case MSG_HAVE_PIECES: {
+        std::string gid, fname;
+        uint32_t nbits = 0;
+        if (!in.get_str(gid) || !in.get_str(fname) || !in.get_u32(nbits)) return false;
+        std::vector<uint8_t> bits(nbits);
+        if (nbits > 0 && !in.get_raw(bits.data(), nbits)) return false;
+        std::string uid, ip;
+        uint16_t port = 0;
+        if (!in.get_str(uid) || !in.get_str(ip) || !in.get_u16(port)) return false;
+        Status s = __state.update_bitfield(gid, uid, ip, port, fname, bits);
+        return s == ST_OK;
+    }
+
+    // TODO: MSG_LOGIN/MSG_LOGOUT are per-connection session state, deliberately
+    // not replicated as ops.
     default:
         return false;
     }

@@ -1,8 +1,8 @@
 #pragma once
 // One instance per connected client, run on its own thread.
 #include <string>
-#include "tracker_state.h"
-#include "sync.h"
+#include "tracker_state.hpp"
+#include "sync.hpp"
 
 namespace p2p {
 

@@ -1,5 +1,5 @@
-#include "tracker_client.h"
-#include "../common/net.h"
+#include "tracker_client.hpp"
+#include "../common/net.hpp"
 
 #include <unistd.h>
 

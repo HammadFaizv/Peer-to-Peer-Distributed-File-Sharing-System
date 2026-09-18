@@ -24,14 +24,15 @@
 #include <thread>
 #include <vector>
 
-#include "piece_store.h"
-#include "seeder.h"
+#include "piece_store.hpp"
+#include "seeder.hpp"
+#include "tracker_client.hpp"
 
 namespace p2p {
 
-struct PeerAddr { 
-    std::string user_id, ip; 
-    uint16_t port; 
+struct PeerAddr {
+    std::string user_id, ip;
+    uint16_t port;
 };
 
 struct DownloadJob {
@@ -40,15 +41,22 @@ struct DownloadJob {
     std::string file_hash;
     std::vector<std::string> piece_hashes;
     std::vector<PeerAddr>    peers;
+    std::string user_id;     // whoever is running this download (for MSG_HAVE_PIECES)
 
     std::shared_ptr<PieceStore> store;
     std::atomic<bool> done{false};
     std::atomic<bool> failed{false};
+
+    // Piece indices still needed by some worker; shared across this job's
+    // peer_worker threads so a piece a dead/bad peer dropped can be picked
+    // up by another one.
+    std::mutex __queue_mu;
+    std::vector<uint32_t> __queue;
 };
 
 class DownloadManager {
 public:
-    explicit DownloadManager(Seeder& s) : seeder_(s) {}
+    DownloadManager(Seeder& s, TrackerClient& tc) : seeder_(s), tracker_(tc) {}
     ~DownloadManager();
 
     // Returns false if a job for (group,file) is already running.
@@ -63,6 +71,7 @@ private:
     bool fetch_piece(int fd, const DownloadJob& job, uint32_t index, std::string& out);
 
     Seeder& seeder_;
+    TrackerClient& tracker_;
     std::mutex __mu_lock;
     std::map<std::string, std::shared_ptr<DownloadJob>> jobs_;  // "group/file"
     std::vector<std::thread> threads_;
