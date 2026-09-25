@@ -3,8 +3,11 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <cstdio>
+#include <thread>
 #include <vector>
 
 namespace p2p {
@@ -81,41 +84,53 @@ std::string SHA1::hash_buffer(const void* data, size_t n) {
 }
 
 std::string SHA1::hash_file(const std::string& path, uint32_t piece_size,
-                            std::string* piece_hashes_out, uint64_t* size_out) {
+                            std::string* piece_hashes_out, uint64_t* size_out,
+                            unsigned threads) {
     int fd = ::open(path.c_str(), O_RDONLY);
     if (fd < 0) return std::string();
+    struct stat st;
+    if (::fstat(fd, &st) < 0) { ::close(fd); return std::string(); }
 
-    SHA1 whole;
-    SHA1 piece;
-    std::vector<char> chunk(64 * 1024);
-    uint64_t total = 0, in_piece = 0;
-    bool piece_open = false;
+    const uint64_t size = static_cast<uint64_t>(st.st_size);
+    const uint32_t pc = static_cast<uint32_t>((size + piece_size - 1) / piece_size);
+    std::vector<std::string> hashes(pc);
+    std::atomic<uint32_t> next{0};
+    std::atomic<bool> failed{false};
 
-    for (;;) {
-        ssize_t k = ::read(fd, chunk.data(), chunk.size());
-        if (k < 0) { ::close(fd); return std::string(); }
-        if (k == 0) break;
-        size_t off = 0;
-        while (off < static_cast<size_t>(k)) {
-            if (!piece_open) { piece.reset(); in_piece = 0; piece_open = true; }
-            size_t room = piece_size - in_piece;
-            size_t take = static_cast<size_t>(k) - off;
-            if (take > room) take = room;
-            whole.update(chunk.data() + off, take);
-            piece.update(chunk.data() + off, take);
-            off += take;
-            in_piece += take;
-            total += take;
-            if (in_piece == piece_size) {
-                if (piece_hashes_out) piece_hashes_out->append(piece.final_hex());
-                piece_open = false;
+    // Workers pull piece indices from a shared counter; each writes only its
+    // own slot in `hashes`, so no lock is needed. pread keeps the fd shareable.
+    auto worker = [&] {
+        std::vector<char> buf(piece_size);
+        for (uint32_t i; !failed && (i = next.fetch_add(1)) < pc;) {
+            uint64_t off = static_cast<uint64_t>(i) * piece_size;
+            size_t len = static_cast<size_t>(std::min<uint64_t>(piece_size, size - off));
+            size_t got = 0;
+            while (got < len) {
+                ssize_t k = ::pread(fd, buf.data() + got, len - got, static_cast<off_t>(off + got));
+                if (k <= 0) { failed = true; return; }
+                got += static_cast<size_t>(k);
             }
+            hashes[i] = hash_buffer(buf.data(), len);
         }
-    }
-    if (piece_open && piece_hashes_out) piece_hashes_out->append(piece.final_hex());
+    };
+
+    // NEW: optional thread argument for threads if non uses max possible for concurrency
+    unsigned n = threads ? threads : std::max(1u, std::thread::hardware_concurrency());
+    n = std::min<unsigned>(n, std::max<uint32_t>(pc, 1));
+    std::vector<std::thread> pool;
+    for (unsigned t = 0; t < n; ++t) pool.emplace_back(worker);
+    for (auto& t : pool) t.join();
     ::close(fd);
-    if (size_out) *size_out = total;
-    return whole.final_hex();
+    if (failed) return std::string();
+
+    std::string blob;
+    blob.reserve(static_cast<size_t>(pc) * 40);
+    for (const auto& h : hashes) blob += h;
+    if (piece_hashes_out) *piece_hashes_out = blob;
+    if (size_out) *size_out = size;
+    // NEW: Whole-file hash = SHA1 of the concatenated piece hashes (hex), since a
+    // true streaming SHA1 over the file can't be parallelised. This is done for speed up.
+    return hash_buffer(blob.data(), blob.size());
 }
 
 } // namespace p2p

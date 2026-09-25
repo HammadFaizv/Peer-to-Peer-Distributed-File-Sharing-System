@@ -66,16 +66,23 @@ uint32_t PieceStore::piece_len(uint32_t index) const {
     return static_cast<uint32_t>(rem);
 }
 
+// NEW: The lock only guards the bitmap; pread/pwrite at distinct offsets are safe
+// concurrently, so disk I/O runs unlocked and parallel connections don't serialize.
+// This ensure speed up in file transfer and file write for faster downloads.
 bool PieceStore::read_piece(uint32_t index, std::string& out) const {
-    std::lock_guard<std::mutex> g(__mu_lock);
-    if (fd_ < 0 || index >= piece_count_) return false;
-    if (!(have_[index / 8] & (0x80u >> (index % 8)))) return false;
+    int fd;
+    {
+        std::lock_guard<std::mutex> g(__mu_lock);
+        if (fd_ < 0 || index >= piece_count_) return false;
+        if (!(have_[index / 8] & (0x80u >> (index % 8)))) return false;
+        fd = fd_;
+    }
     uint32_t n = piece_len(index);
     out.assign(n, '\0');
     off_t off = static_cast<off_t>(index) * PIECE_SIZE;
     size_t got = 0;
     while (got < n) {
-        ssize_t k = ::pread(fd_, &out[got], n - got, off + got);
+        ssize_t k = ::pread(fd, &out[got], n - got, off + got);
         if (k <= 0) return false;
         got += static_cast<size_t>(k);
     }
@@ -90,15 +97,21 @@ bool PieceStore::write_piece(uint32_t index, const std::string& data,
     // or a later reader would seed corruption onward.
     if (SHA1::hash_buffer(data.data(), data.size()) != expected_hash) return false;
 
-    std::lock_guard<std::mutex> g(__mu_lock);
-    if (fd_ < 0) return false;
+    int fd;
+    {
+        std::lock_guard<std::mutex> g(__mu_lock);
+        if (fd_ < 0) return false;
+        fd = fd_;
+    }
     off_t off = static_cast<off_t>(index) * PIECE_SIZE;
     size_t put = 0;
     while (put < data.size()) {
-        ssize_t k = ::pwrite(fd_, data.data() + put, data.size() - put, off + put);
+        ssize_t k = ::pwrite(fd, data.data() + put, data.size() - put, off + put);
         if (k <= 0) return false;
         put += static_cast<size_t>(k);
     }
+    // Mark only after the bytes are on disk so a reader never serves a half-written piece.
+    std::lock_guard<std::mutex> g(__mu_lock);
     have_[index / 8] |= (0x80u >> (index % 8));
     return true;
 }

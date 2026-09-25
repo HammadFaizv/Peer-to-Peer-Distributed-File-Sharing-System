@@ -1,10 +1,11 @@
 // download manager deal with all downloads using
-// thread per peer for a download instead of per piece
+// UPDATE: a few threads (connections) per peer for a download instead of per piece
 // benefits - lower thread count no need to create new thread for each piece
-// as pieces can be many
+// as pieces can be many, while a lone seeder still gets parallel requests
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -40,6 +41,12 @@ struct DownloadJob {
     // up by another one.
     std::mutex __queue_mu;
     std::vector<uint32_t> __queue;
+
+    // NEW NOTE - Tracker announcements are now batched: a blocking round-trip per piece
+    // stalls the download thousands of times on large files.
+    std::mutex __announce_mu;
+    std::chrono::steady_clock::time_point last_announce{};
+    uint32_t pieces_since_announce = 0;
 };
 
 class DownloadManager {
@@ -57,6 +64,8 @@ private:
     void run_job(std::shared_ptr<DownloadJob> job);
     void peer_worker(std::shared_ptr<DownloadJob> job, PeerAddr peer);
     bool fetch_piece(int fd, const DownloadJob& job, uint32_t index, std::string& out);
+    void announce(DownloadJob& job);
+    void maybe_announce(DownloadJob& job);
 
     Seeder& seeder_;
     TrackerClient& tracker_;

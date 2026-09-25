@@ -15,12 +15,14 @@ public:
     std::string final_hex(); // 40 lowercase hex chars
 
     static std::string hash_buffer(const void* data, size_t n);
-    // Streams the file in chunks; never loads it whole. Returns "" on error.
-    // If piece_hashes is non-null it is filled with per-piece hashes.
+    // Hashes each piece in parallel (one piece buffer per thread, never the
+    // whole file). Returns SHA1 of the concatenated piece hashes, "" on error.
+    // threads == 0 means use hardware_concurrency().
     static std::string hash_file(const std::string& path,
                                  uint32_t piece_size,
                                  std::string* piece_hashes_out = nullptr,
-                                 uint64_t* size_out = nullptr);
+                                 uint64_t* size_out = nullptr,
+                                 unsigned threads = 0);
 
 private:
     void transform(const uint8_t* block);

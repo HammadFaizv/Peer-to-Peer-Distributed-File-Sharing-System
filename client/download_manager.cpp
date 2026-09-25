@@ -4,11 +4,16 @@
 #include "../common/sha1.hpp"
 
 #include <unistd.h>
+#include <algorithm>
 #include <cstdio>
 
 namespace p2p {
 
 namespace {
+constexpr size_t kTargetConnections = 8;
+constexpr uint32_t kAnnounceEveryPieces = 32;
+constexpr auto kAnnounceInterval = std::chrono::seconds(1);
+
 // Decodes an MSG_GET_FILE_META response body into a fresh peer
 // list skipping `self_uid`.
 bool decode_peer_list(const std::string& resp, const std::string& self_uid,
@@ -77,11 +82,17 @@ void DownloadManager::run_job(std::shared_ptr<DownloadJob> job) {
                 if (!job->store->have(i)) job->__queue.push_back(i);
         }
 
+        // Several connections per peer so a single seeder isn't stuck in
+        // strict request/response lockstep; fewer each when there are many peers.
+        size_t conns_per_peer = std::max<size_t>(1, kTargetConnections / peers.size());
         std::vector<std::thread> workers;
-        workers.reserve(peers.size());
-        for (const auto& peer : peers) workers.emplace_back(&DownloadManager::peer_worker, this, job, peer);
+        workers.reserve(peers.size() * conns_per_peer);
+        for (const auto& peer : peers)
+            for (size_t c = 0; c < conns_per_peer; ++c)
+                workers.emplace_back(&DownloadManager::peer_worker, this, job, peer);
         for (auto& t : workers) if (t.joinable()) t.join();
 
+        announce(*job);  // flush whatever the batching held back
         if (job->store->complete()) break;
 
         // Some pieces are still missing because every peer that had them
@@ -95,10 +106,9 @@ void DownloadManager::run_job(std::shared_ptr<DownloadJob> job) {
         }
     }
 
+    // No whole-file re-hash: write_piece already verified every piece against
+    // its SHA1, so re-reading the entire file from disk adds nothing.
     if (!job->store->complete()) { job->failed = true; return; }
-
-    std::string whole = SHA1::hash_file(job->dest_path, PIECE_SIZE, nullptr, nullptr);
-    if (whole.empty() || whole != job->file_hash) { job->failed = true; return; }
 
     // As soon as the file is whole, this client becomes a full seeder for it.
     seeder_.add_share(ShareKey{job->group, job->file}, job->store);
@@ -140,19 +150,38 @@ void DownloadManager::peer_worker(std::shared_ptr<DownloadJob> job, PeerAddr pee
             continue;
         }
         consecutive_failures = 0;
-
-        // Announce the freshly completed piece so this client is usable
-        Buffer hb;
-        hb.put_str(job->group);
-        hb.put_str(job->file);
-        auto bits = job->store->bitfield();
-        hb.put_u32(static_cast<uint32_t>(bits.size()));
-        hb.put_raw(bits.data(), bits.size());
-        uint16_t status;
-        std::string resp;
-        tracker_.request(MSG_HAVE_PIECES, hb.str(), status, resp);
+        maybe_announce(*job);
     }
     ::close(fd);
+}
+
+void DownloadManager::announce(DownloadJob& job) {
+    {
+        std::lock_guard<std::mutex> g(job.__announce_mu);
+        job.pieces_since_announce = 0;
+        job.last_announce = std::chrono::steady_clock::now();
+    }
+    // Lets other peers start pulling finished pieces from this client.
+    Buffer hb;
+    hb.put_str(job.group);
+    hb.put_str(job.file);
+    auto bits = job.store->bitfield();
+    hb.put_u32(static_cast<uint32_t>(bits.size()));
+    hb.put_raw(bits.data(), bits.size());
+    uint16_t status;
+    std::string resp;
+    tracker_.request(MSG_HAVE_PIECES, hb.str(), status, resp);
+}
+
+void DownloadManager::maybe_announce(DownloadJob& job) {
+    {
+        std::lock_guard<std::mutex> g(job.__announce_mu);
+        ++job.pieces_since_announce;
+        bool due = job.pieces_since_announce >= kAnnounceEveryPieces ||
+                   std::chrono::steady_clock::now() - job.last_announce >= kAnnounceInterval;
+        if (!due) return;
+    }
+    announce(job);
 }
 
 bool DownloadManager::fetch_piece(int fd, const DownloadJob& job,

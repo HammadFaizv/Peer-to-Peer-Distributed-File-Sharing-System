@@ -146,8 +146,6 @@ Status TrackerState::list_requests(const std::string& gid, const std::string& ow
     return ST_OK;
 }
 
-// --- file metadata ---------------------------------------------------
-
 Status TrackerState::add_file(const std::string& gid, const std::string& uid,
                               const std::string& ip, uint16_t port,
                               const FileMeta& meta) {
