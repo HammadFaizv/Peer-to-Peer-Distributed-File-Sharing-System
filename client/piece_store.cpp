@@ -5,7 +5,9 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <algorithm>
+#include <atomic>
 #include <cstring>
+#include <thread>
 
 namespace p2p {
 
@@ -39,25 +41,47 @@ bool PieceStore::open_for_download(const std::string& path, uint64_t size, uint3
     return true;
 }
 
+// Runs before any download worker starts, so hashing happens unlocked across
+// all cores; only the final bitmap update takes the lock.
 void PieceStore::resume_scan(const std::vector<std::string>& piece_hashes) {
-    std::lock_guard<std::mutex> g(__mu_lock);
-    if (fd_ < 0) return;
-    std::string buf;
-    uint32_t n = std::min(piece_count_, static_cast<uint32_t>(piece_hashes.size()));
-    for (uint32_t i = 0; i < n; ++i) {
-        uint32_t len = piece_len(i);
-        buf.assign(len, '\0');
-        off_t off = static_cast<off_t>(i) * PIECE_SIZE;
-        size_t got = 0;
-        bool ok = true;
-        while (got < len) {
-            ssize_t k = ::pread(fd_, &buf[got], len - got, off + got);
-            if (k <= 0) { ok = false; break; }
-            got += static_cast<size_t>(k);
-        }
-        if (ok && SHA1::hash_buffer(buf.data(), buf.size()) == piece_hashes[i])
-            have_[i / 8] |= (0x80u >> (i % 8));
+    int fd;
+    uint32_t n;
+    {
+        std::lock_guard<std::mutex> g(__mu_lock);
+        if (fd_ < 0) return;
+        fd = fd_;
+        n = std::min(piece_count_, static_cast<uint32_t>(piece_hashes.size()));
     }
+    std::vector<uint8_t> valid(n, 0);
+    std::atomic<uint32_t> next{0};
+    auto worker = [&] {
+        std::string buf;
+        for (uint32_t i; (i = next.fetch_add(1)) < n;) {
+            uint32_t len = piece_len(i);
+            off_t off = static_cast<off_t>(i) * PIECE_SIZE;
+            // Never-written pieces are holes in the sparse file; skip hashing
+            // them. lseek moves the shared offset, but all other I/O is pread/pwrite.
+            off_t data = ::lseek(fd, off, SEEK_DATA);
+            if (data < 0 || data >= off + static_cast<off_t>(len)) continue;
+            buf.assign(len, '\0');
+            size_t got = 0;
+            while (got < len) {
+                ssize_t k = ::pread(fd, &buf[got], len - got, off + got);
+                if (k <= 0) break;
+                got += static_cast<size_t>(k);
+            }
+            valid[i] = got == len && SHA1::hash_buffer(buf.data(), len) == piece_hashes[i];
+        }
+    };
+    unsigned nt = std::min<unsigned>(std::max(1u, std::thread::hardware_concurrency()),
+                                     std::max<uint32_t>(n, 1));
+    std::vector<std::thread> pool;
+    for (unsigned t = 0; t < nt; ++t) pool.emplace_back(worker);
+    for (auto& t : pool) t.join();
+
+    std::lock_guard<std::mutex> g(__mu_lock);
+    for (uint32_t i = 0; i < n; ++i)
+        if (valid[i]) have_[i / 8] |= (0x80u >> (i % 8));
 }
 
 uint32_t PieceStore::piece_len(uint32_t index) const {

@@ -155,16 +155,25 @@ Status TrackerState::add_file(const std::string& gid, const std::string& uid,
     if (it == __Groups.end()) return ST_NOT_FOUND;
     Group& grp = it->second;
     if (!grp.members.count(uid)) return ST_NOT_MEMBER;
-    if (grp.files.count(meta.name)) return ST_ALREADY_EXISTS;
 
-    FileMeta fm = meta;
-    fm.seeders.clear();
     // The uploader starts out holding every piece.
     PeerRef pr;
     pr.user_id = uid;
     pr.ip = ip;
     pr.port = port;
-    pr.bitfield.assign((fm.piece_hashes.size() + 7) / 8, 0xFFu);
+    pr.bitfield.assign((meta.piece_hashes.size() + 7) / 8, 0xFFu);
+
+    auto fit = grp.files.find(meta.name);
+    if (fit != grp.files.end()) {
+        // Re-uploading identical content (e.g. a seeder that crashed and came
+        // back, whose seeder entry logout() dropped) just re-registers it.
+        if (fit->second.file_hash != meta.file_hash) return ST_ALREADY_EXISTS;
+        fit->second.seeders[uid] = pr;
+        return ST_OK;
+    }
+
+    FileMeta fm = meta;
+    fm.seeders.clear();
     fm.seeders[uid] = pr;
     grp.files[meta.name] = std::move(fm);
     return ST_OK;

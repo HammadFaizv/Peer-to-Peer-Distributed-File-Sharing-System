@@ -3,6 +3,8 @@
 #include "../common/buffer.hpp"
 #include "../common/sha1.hpp"
 
+#include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 #include <algorithm>
 #include <cstdio>
@@ -13,6 +15,9 @@ namespace {
 constexpr size_t kTargetConnections = 8;
 constexpr uint32_t kAnnounceEveryPieces = 32;
 constexpr auto kAnnounceInterval = std::chrono::seconds(1);
+constexpr int kMaxRounds = 5;                         // ~20s of retrying in total
+constexpr auto kRetryBackoff = std::chrono::seconds(2);
+constexpr int kPeerIoTimeoutSec = 10;
 
 // Decodes an MSG_GET_FILE_META response body into a fresh peer
 // list skipping `self_uid`.
@@ -46,7 +51,9 @@ bool DownloadManager::start(std::shared_ptr<DownloadJob> job) {
     std::string key = job->group + "/" + job->file;
     {
         std::lock_guard<std::mutex> g(__mu_lock);
-        if (jobs_.count(key)) return false;
+        // A finished or failed job can be restarted; resume_scan keeps its progress.
+        auto it = jobs_.find(key);
+        if (it != jobs_.end() && !it->second->done && !it->second->failed) return false;
         jobs_[key] = job;
         threads_.emplace_back(&DownloadManager::run_job, this, job);
     }
@@ -74,7 +81,18 @@ void DownloadManager::run_job(std::shared_ptr<DownloadJob> job) {
     // A peer that dies or sends a bad piece - drops it
     // back on the queue (peer_worker) so this loop only needs to notice when
     // pieces are still missing after everyone has had a turn.
-    for (int round = 0; round < 3 && !job->store->complete() && !peers.empty(); ++round) {
+    for (int round = 0; round < kMaxRounds && !job->store->complete(); ++round) {
+        if (round > 0) {
+            // Back off so a seeder that crashed has time to come back, then
+            // ask the tracker who currently holds the file.
+            std::this_thread::sleep_for(kRetryBackoff * round);
+            Buffer req; req.put_str(job->group); req.put_str(job->file);
+            uint16_t status; std::string resp;
+            peers.clear();
+            if (tracker_.request(MSG_GET_FILE_META, req.str(), status, resp) && status == ST_OK)
+                decode_peer_list(resp, job->user_id, peers);
+            if (peers.empty()) continue;
+        }
         {
             std::lock_guard<std::mutex> g(job->__queue_mu);
             job->__queue.clear();
@@ -92,18 +110,9 @@ void DownloadManager::run_job(std::shared_ptr<DownloadJob> job) {
                 workers.emplace_back(&DownloadManager::peer_worker, this, job, peer);
         for (auto& t : workers) if (t.joinable()) t.join();
 
+        // Pieces still missing here means every peer that had them died or
+        // misbehaved this round; the next round retries with a fresh peer list.
         announce(*job);  // flush whatever the batching held back
-        if (job->store->complete()) break;
-
-        // Some pieces are still missing because every peer that had them
-        // died or misbehaved this round; ask the tracker for a fresh peer list
-        // and try again
-        Buffer req; req.put_str(job->group); req.put_str(job->file);
-        uint16_t status; std::string resp;
-        peers.clear();
-        if (tracker_.request(MSG_GET_FILE_META, req.str(), status, resp) && status == ST_OK) {
-            decode_peer_list(resp, job->user_id, peers);
-        }
     }
 
     // No whole-file re-hash: write_piece already verified every piece against
@@ -126,6 +135,12 @@ constexpr int maxConsecutiveFailures = 3;
 void DownloadManager::peer_worker(std::shared_ptr<DownloadJob> job, PeerAddr peer) {
     int fd = tcp_connect(peer.ip, peer.port);
     if (fd < 0) return; // dead peer: just retire this worker, its pieces stay queued
+
+    // Without a timeout, a peer whose machine vanished (no FIN/RST) leaves
+    // recv blocked forever; the timeout turns that into a normal fetch failure.
+    timeval tv{kPeerIoTimeoutSec, 0};
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
     int consecutive_failures = 0;
     for (;;) {
